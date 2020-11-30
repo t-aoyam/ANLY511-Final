@@ -1,0 +1,463 @@
+---
+title: "kindleReview_LDA_sentiment_analysis"
+author: "Yuduo Jin"
+date: "11/5/2020"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(NLP)
+# install.packages("tokenizers")
+library(tokenizers)
+# read in the libraries we're going to use
+library(tidyverse) # general utility & workflow functions
+# install.packages("tidytext")
+library(tidytext) # tidy implimentation of NLP methods
+# install.packages("topicmodels")
+library(topicmodels) # for LDA topic modeling 
+library(tm) # general text mining functions, making document term matrixes
+library(SnowballC) # for stemming
+library(ggplot2)
+# install.packages("ldatuning")
+library(ldatuning)
+library(data.table)
+library(stringr)
+# install.packages("RTextTools")
+library(RTextTools)
+# install.packages("caret")
+library(caret)
+library(e1071)
+# Library for parallel processing
+# install.packages("doMC")
+library(doMC)
+registerDoMC(cores=detectCores())  # Use all available cores
+```
+
+the first 10000 records
+
+```{r}
+kindle_head<- read.csv("kindle_reviews.csv", nrow = 10000)
+head(kindle_head)
+```
+
+# LDA
+
+Only look at the reviewText of products whose overall score is 1
+
+```{r}
+kindle_head_bad <- kindle_head[kindle_head["overall"] == 1, ]
+head(kindle_head_bad)
+review <- kindle_head_bad["reviewText"]
+head(review)
+```
+
+Pre-processing
+
+```{r}
+cleaned_string <- c()
+for (i in 1:nrow(review)) {
+  tempt_string <- as.String(review[i,])
+  tempt_string <- gsub("reading", "read", tempt_string)
+  tempt_string <- gsub("having", "have", tempt_string)
+  tempt_string <- gsub("good", "great", tempt_string)
+  tempt_string <- gsub("books", "book", tempt_string)
+  tempt_string <- gsub("stories", "story", tempt_string)
+  tempt_string <- gsub("loved", "love", tempt_string)
+  tempt_string <- gsub("enjoyed", "enjoy", tempt_string)
+  tempt_string <- gsub("wanted", "want", tempt_string)
+  tempt_string <- gsub("wants", "want", tempt_string)
+  tempt_string <- gsub("characters", "character", tempt_string)
+  tempt_string <- gsub("things", "thing", tempt_string)
+  tempt_string <- gsub("written", "write", tempt_string)
+  tempt_string <- gsub("writting", "write", tempt_string)
+  tempt_string <- gsub("liked", "like", tempt_string)
+  tempt_string <- gsub("likes", "like", tempt_string)
+  tempt_string <- gsub("needs", "need", tempt_string)
+  
+  cleaned_string <- append(cleaned_string, tempt_string)
+}
+```
+
+```{r}
+BigramTokenizer <- function(x) {
+  unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE)
+}
+```
+
+```{r}
+# create a document term matrix to clean
+reviewsCorpus <- Corpus(VectorSource(cleaned_string)) 
+reviewsCorpus
+MyStopwords<-c("n't", "also", "think", "quite", "get", "still", "say", "one", "two", "dont",
+                 "yet", "take", "bit", "put", "make", "else", "'ll", "able", "les", "didnt",
+                 "see", "find", "lot", "yeah", "goes", "alike", "know", "want", "anyway",
+                 "come", "must", "although", "though", "would", "however", "whether", "being",
+                 "per", "almost", "till", "anyone", "rather", "many", "little", "become",
+                 "really", "another", "might", "either", "since", "making", "kept", "what",
+                 "every", "feel", "'ve", "keep", "getting", "thi", "'re", "have", "after",
+                 ".no", "ident.i", "got", ".it", "ever", "could", "seem", "mr.", "they",
+                 "whole", "already", "always", "nothing", "five", "never", "much", "include",
+                 "etc.", "_twenty", "felt", "themselves", "_in", "unlike", "kindle.i", "someone",
+                 "came", "without", "went", "blood.the", "comes", "that", "this", "with", "their",
+                 "more", "very", "than", "from", "about", "there", "them", "been", "just", "like",
+                 "which", "most", "when", "into", "other", "some", "will", "where", "even",
+                 "through", "then", "those", "such", "should", "here", "wasnt", "while", "gives",
+                 "well", "because", "doesnt", "your", "these", "were", "first", "only", "give",
+                 "each", "three", "read", "couldnt", "cant", "over", "going", "does", "seemed",
+                 "great", "better", "love", "thing", "thats", "maybe", "supposed", "before",
+                 "something", "theres", "between", "cant", "dont", "found", "made", "says",
+                 "theyre", "like", "write", "writing", "said", "need", "gets", "isnt", "trying",
+                 "thought", "away")
+
+review_dtm <- DocumentTermMatrix(reviewsCorpus,
+                         control = list(
+                           ngram_window = c(1, 2),
+                           #stopwords = TRUE, ## remove normal stopwords
+                           wordLengths=c(4, 10), 
+                           ## get rid of words of len 4 or smaller or larger than 10
+                           removePunctuation = TRUE,
+                           removeNumbers = TRUE,
+                           tolower=TRUE,
+                           #stemming = TRUE,
+                           remove_separators = TRUE,
+                           stopwords = MyStopwords,
+                           removeWords = TRUE,
+                           tokenizer=BigramTokenizer
+                           #bounds = list(global = c(minTermFreq, maxTermFreq))
+                         ))
+
+DTM_mat <- as.matrix(review_dtm)
+```
+
+```{r}
+head(as.data.frame(DTM_mat)[,0:20], n=20L)
+```
+
+find the optimal number of topics: calculate all metrics at once. All existing methods require to train multiple LDA models to select one with the best performance.
+
+```{r}
+result <- FindTopicsNumber(
+  review_dtm,
+  topics = seq(from = 2, to = 100, by = 5),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+FindTopicsNumber_plot(result)
+```
+
+Metric Deveaud2014 and CaoJuan2009 are not informative in this situation.
+
+From this plot can be made conclusion that optimal number of topics is in range 12-22.
+
+```{r}
+# narrow down the range
+result <- FindTopicsNumber(
+  review_dtm,
+  topics = seq(from = 7, to = 30, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+FindTopicsNumber_plot(result)
+```
+
+```{r}
+# narrow down the range
+result <- FindTopicsNumber(
+  review_dtm,
+  topics = seq(from = 10, to = 17, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+```
+
+```{r}
+FindTopicsNumber_plot(result)
+```
+
+From this plot can be made conclusion that optimal number of topics is in 11 or 13. I will try both to test which one has the better performance.
+
+lda
+
+```{r}
+length(unique(kindle_head_bad$asin))
+```
+
+```{r}
+ap_lda <- LDA(DTM_mat , k = 13, control = list(seed = 1234))
+ap_lda
+```
+
+The tidytext package provides this method for extracting the per-topic-per-word probabilities, called (“beta”), from the model.
+  
+```{r}
+ap_topics <- tidy(ap_lda, matrix = "beta")
+head(ap_topics, n=20L)
+```
+
+Notice that this has turned the model into a one-topic-per-term-per-row format. For each combination, the model computes the probability of that term being generated from that topic. For example, the term “book” has a  0.017 probability of being generated from topic 1, but a  0.113 probability of being generated from topic 2.
+
+We could use dplyr’s top_n() to find the 10 terms that are most common within each topic. As a tidy data frame, this lends itself well to a ggplot2 visualization.
+
+```{r}
+ap_top_terms <- ap_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() + 
+  theme(axis.text.x = element_text(size = 8, vjust = 0.5, hjust = 0.5, angle = 45)) +
+  theme(axis.text.y = element_text(size = 4, vjust = 0, hjust = 0.5))
+```
+
+Findings: Gender issue might be revealed in these 1-score reviews. The books which were rated badly were female-theme books or contained heroine or female characters. Also, there were bad comments about kindle rather than book contents. Some kindle books from amazon might have issue with version, print problems. As for genres, romance books were relatively more frequent than other genres in 1-score reviews. And books with series might receive more 1-score reviews than books without series. Besides, most readers who provided 1 score rate often had some negative reviews for character, story, author and plot of a book.
+
+<!-- per document classification -->
+
+<!-- ```{r} -->
+<!-- ap_documents <- tidy(ap_lda, matrix = "gamma") -->
+<!-- ap_documents -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- tweet_classifications <- ap_documents %>% -->
+<!--   group_by(document) %>% -->
+<!--   slice_max(gamma) %>% -->
+<!--   ungroup() -->
+
+<!-- tweet_classifications -->
+<!-- ``` -->
+
+# Sentiment Analysis
+
+```{r}
+kindle_head[1:100,]
+```
+
+remove records whose "helpful" is [0,0]
+
+```{r}
+kindle_head_help <- kindle_head[!kindle_head$helpful == "[0, 0]", ]
+kindle_head_help[1:20,]
+nrow(kindle_head_help["helpful"])
+```
+
+helpful rate
+
+```{r}
+kindle_head_help$helpful_a <- numeric(nrow(kindle_head_help["helpful"]))
+for(i in 1:nrow(kindle_head_help)){
+  temp <- str_split(str_remove_all(kindle_head_help[i,]$helpful, "[^a-zA-Z|0-9|,]"), ',', simplify = TRUE)
+  if(as.integer(temp[,2]) != 0){
+    kindle_head_help[i,]$helpful_a <- round(as.numeric(temp[,1])/as.numeric(temp[,2]), 2)
+  }
+  else{
+    kindle_head_help[i,]$helpful_a <- NA
+  }
+}
+kindle_head_help[1:100,]
+```
+
+focus on the most helpful records (helpful_a == 1.00)
+
+```{r}
+mosthelpfulDF <- kindle_head_help[kindle_head_help$helpful_a == 1, c("reviewText", "overall", "helpful_a")]
+head(mosthelpfulDF, n=20L)
+help_review <- mosthelpfulDF["reviewText"]
+head(help_review)
+```
+
+create labels for this data frame based on overall scores
+
+```{r}
+mean(is.na(mosthelpfulDF$overall))
+```
+
+```{r}
+hist(mosthelpfulDF$overall)
+table(mosthelpfulDF$overall)
+```
+
+```{r}
+mosthelpfulDF$senti_label <- numeric(nrow(mosthelpfulDF))
+for (row in 1:nrow(mosthelpfulDF)) {
+  if (mosthelpfulDF[row,]$overall %in% c(4,5)) {
+    mosthelpfulDF[row,]$senti_label <- "positive"
+  }
+  else {
+    mosthelpfulDF[row,]$senti_label <- "negtive"
+  }
+}
+mosthelpfulDF$senti_label <- as.factor(mosthelpfulDF$senti_label)
+head(mosthelpfulDF, n=20L)
+```
+
+Pre-processing
+
+```{r}
+cleaned_helpfulstring <- c()
+for (i in 1:nrow(help_review)) {
+  tempt_string <- as.String(help_review[i,])
+  tempt_string <- gsub("reading", "read", tempt_string)
+  tempt_string <- gsub("having", "have", tempt_string)
+  tempt_string <- gsub("good", "great", tempt_string)
+  tempt_string <- gsub("books", "book", tempt_string)
+  tempt_string <- gsub("stories", "story", tempt_string)
+  tempt_string <- gsub("loved", "love", tempt_string)
+  tempt_string <- gsub("enjoyed", "enjoy", tempt_string)
+  tempt_string <- gsub("wanted", "want", tempt_string)
+  tempt_string <- gsub("wants", "want", tempt_string)
+  tempt_string <- gsub("characters", "character", tempt_string)
+  tempt_string <- gsub("things", "thing", tempt_string)
+  
+  cleaned_helpfulstring <- append(cleaned_helpfulstring, tempt_string)
+}
+```
+
+```{r}
+# create a document term matrix to clean
+helpReviewsCorpus <- Corpus(VectorSource(cleaned_helpfulstring))
+
+helpReviewsCorpus <- helpReviewsCorpus %>%
+  tm_map(content_transformer(tolower)) %>% 
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removeWords, stopwords(kind="en")) %>%
+  tm_map(stripWhitespace)
+
+MyStopwords<-c("also", "been", "himthe", "looksee", "made", "this")
+
+helpreview_dtm <- DocumentTermMatrix(helpReviewsCorpus,
+                         control = list(
+                           ngram_window = c(1, 2),
+                           #stopwords = TRUE, ## remove normal stopwords
+                           wordLengths=c(4, 10), 
+                           ## get rid of words of len 4 or smaller or larger than 10
+                           removePunctuation = TRUE,
+                           removeNumbers = TRUE,
+                           tolower=TRUE,
+                           #stemming = TRUE,
+                           remove_separators = TRUE,
+                           stopwords = MyStopwords,
+                           removeWords = TRUE,
+                           tokenizer=BigramTokenizer
+                           #bounds = list(global = c(minTermFreq, maxTermFreq))
+                         ))
+
+inspect(helpreview_dtm[40:50, 1:10])
+```
+
+Splitting training and test data set
+
+```{r}
+dim(helpreview_dtm)
+length(helpReviewsCorpus)
+```
+
+```{r}
+# create train/test data (80%, 20%)
+helpdf.train <- mosthelpfulDF[1:1600,]
+helpdf.test <- mosthelpfulDF[1601:2000,]
+
+helpreview_dtm.train <- helpreview_dtm[1:1600,]
+helpreview_dtm.test <- helpreview_dtm[1601:2000,]
+
+helpReviewsCorpus.train <- helpReviewsCorpus[1:1600]
+helpReviewsCorpus.test <- helpReviewsCorpus[1601:2000]
+```
+
+Feature Selection
+
+reduce the number of features by ignoring words which appear in less than five reviews.
+
+```{r}
+fivefreq <- findFreqTerms(helpreview_dtm.train, 5)
+length((fivefreq))
+
+# Use only 5 most frequent words (fivefreq) to build the DTM
+dtm.train.nb <- DocumentTermMatrix(helpReviewsCorpus.train, control=list(dictionary = fivefreq))
+dim(dtm.train.nb)
+inspect(dtm.train.nb[1:10, 40:50])
+
+dtm.test.nb <- DocumentTermMatrix(helpReviewsCorpus.test, control=list(dictionary = fivefreq))
+dim(dtm.test.nb)
+inspect(dtm.test.nb[1:10, 40:50])
+```
+
+### The Naive Bayes algorithm
+
+The Naive Bayes text classification algorithm is essentially an application of Bayes theorem (with a strong independence assumption) to documents and classes.
+
+Boolean feature Multinomial Naive Bayes
+
+We use a variation of the multinomial Naive Bayes algorithm known as binarized (boolean feature) Naive Bayes due to Dan Jurafsky. In this method, the term frequencies are replaced by Boolean presence/absence features. The logic behind this being that for sentiment classification, word occurrence matters more than word frequency.
+
+```{r}
+# Function to convert the word frequencies to yes (presence) and no (absence) labels
+convert_count <- function(x) {
+  y <- ifelse(x > 0, 1,0)
+  y <- factor(y, levels=c(0,1), labels=c("No", "Yes"))
+  y
+}
+```
+
+```{r}
+# Apply the convert_count function to get final training and testing DTMs
+trainNB <- apply(dtm.train.nb, 2, convert_count)
+testNB <- apply(dtm.test.nb, 2, convert_count)
+```
+
+Training the Naive Bayes Model
+
+To train the model we use the naiveBayes function from the ‘e1071’ package. Since Naive Bayes evaluates products of probabilities, we need some way of assigning non-zero probabilities to words which do not occur in the sample. We use Laplace 1 smoothing to this end.
+
+```{r}
+helpreview_classifier <- naiveBayes(as.matrix(trainNB), helpdf.train$senti_label)
+```
+
+Evaluating model performance
+
+```{r}
+helpreview_test_pred <- predict(helpreview_classifier, as.matrix(testNB))
+head(helpreview_test_pred)
+```
+
+```{r}
+table("Predictions"= helpreview_test_pred,  "Actual" = helpdf.test$senti_label)
+```
+
+confusion matrix
+
+```{r}
+# Prepare the confusion matrix
+conf.mat <- confusionMatrix(helpreview_test_pred, helpdf.test$senti_label)
+conf.mat
+```
+
+
+
+
+
+
